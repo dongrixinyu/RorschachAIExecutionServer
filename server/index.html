@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket 音频对话客户端</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f2f5;
+        }
+        .container {
+            text-align: center;
+            background-color: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        #status, #recording-status {
+            margin: 15px 0;
+            font-size: 1.1em;
+            color: #555;
+        }
+        #status.connected { color: #28a745; }
+        #status.disconnected { color: #dc3545; }
+        #recording-status.recording { color: #e67e22; }
+        #recording-status.stopped { color: #3498db; }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+            margin: 5px;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>实时语音对话</h1>
+    <div id="status" class="disconnected">状态: 未连接</div>
+    <div id="recording-status" class="stopped">录音: 已停止</div>
+    <button id="toggle-btn" disabled>连接中...</button>
+</div>
+
+<!-- 配置文件 -->
+<script src="./config.js"></script>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const statusDiv = document.getElementById('status');
+        const recordingStatusDiv = document.getElementById('recording-status');
+        const toggleBtn = document.getElementById('toggle-btn');
+
+        let ws;
+        let audioContext;
+        let mediaStream;
+        let scriptProcessor;
+        let isRecording = false;
+        
+        // 使用统一配置获取 WebSocket URL
+        const WEBSOCKET_URL = window.WS_CONFIG ? window.WS_CONFIG.getWebSocketUrl() : "ws://localhost:8765";
+        
+        // --- 核心修改：将采样率调整为 24000 Hz ---
+        const TARGET_SAMPLE_RATE = 24000; 
+        
+        const BUFFER_SIZE = 4096;
+
+        let audioQueue = [];
+        let isPlaying = false;
+        let nextPlayTime = 0;
+
+        function connectWebSocket() {
+            ws = new WebSocket(WEBSOCKET_URL);
+
+            ws.onopen = () => {
+                console.log("WebSocket 连接成功.");
+                statusDiv.textContent = '状态: 已连接';
+                statusDiv.className = 'connected';
+                toggleBtn.textContent = '开始对话';
+                toggleBtn.disabled = false;
+            };
+
+            ws.onmessage = (event) => {
+                let dataPromise;
+                if (event.data instanceof Blob) {
+                    dataPromise = event.data.arrayBuffer();
+                } else if (event.data instanceof ArrayBuffer) {
+                    dataPromise = Promise.resolve(event.data);
+                }
+
+                if (dataPromise) {
+                    dataPromise.then(arrayBuffer => {
+                        audioQueue.push(arrayBuffer);
+                        if (!isPlaying) {
+                            playQueue();
+                        }
+                    }).catch(err => console.error("Error processing message data:", err));
+                }
+            };
+
+            ws.onclose = () => {
+                console.log("WebSocket 连接已关闭.");
+                statusDiv.textContent = '状态: 已断开';
+                statusDiv.className = 'disconnected';
+                toggleBtn.textContent = '重新连接';
+                toggleBtn.disabled = false;
+                stopRecording();
+                audioQueue = [];
+                isPlaying = false;
+                nextPlayTime = 0;
+            };
+
+            ws.onerror = (error) => {
+                console.error("WebSocket 错误:", error);
+                statusDiv.textContent = '状态: 连接错误';
+                statusDiv.className = 'disconnected';
+                toggleBtn.disabled = true;
+            };
+        }
+        
+        async function playQueue() {
+            if (audioQueue.length === 0) {
+                isPlaying = false;
+                return;
+            }
+
+            isPlaying = true;
+            const arrayBuffer = audioQueue.shift();
+
+            if (!audioContext || arrayBuffer.byteLength === 0) {
+                playQueue();
+                return;
+            }
+
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+
+            const int16View = new Int16Array(arrayBuffer);
+            const float32Array = new Float32Array(int16View.length);
+            for (let i = 0; i < int16View.length; i++) {
+                float32Array[i] = int16View[i] / 32768.0;
+            }
+            
+            // 使用 AudioContext 的实际采样率来创建 Buffer
+            const audioBuffer = audioContext.createBuffer(1, float32Array.length, audioContext.sampleRate);
+            audioBuffer.copyToChannel(float32Array, 0);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(audioContext.destination);
+
+            const currentTime = audioContext.currentTime;
+            const startTime = Math.max(currentTime, nextPlayTime);
+            source.start(startTime);
+
+            nextPlayTime = startTime + audioBuffer.duration;
+            source.onended = playQueue;
+        }
+
+        async function initAudio() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: TARGET_SAMPLE_RATE // 使用我们定义的目标采样率初始化
+                });
+                nextPlayTime = audioContext.currentTime;
+            }
+            
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+            
+            // 注意：麦克风输入采样率可以与播放采样率不同，浏览器会自动处理重采样
+            // 因此我们请求一个常见的麦克风采样率即可
+            if (!mediaStream) {
+                try {
+                    mediaStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: 16000, // 麦克风输入用 16k 即可
+                            channelCount: 1,
+                            echoCancellation: true
+                        }
+                    });
+                } catch (err) {
+                    console.error("获取麦克风失败:", err);
+                    alert("无法访问麦克风。请检查权限设置。");
+                    return false;
+                }
+            }
+            return true;
+        }
+        
+        function startRecording() {
+            if (isRecording || !ws || ws.readyState !== WebSocket.OPEN) return;
+            
+            initAudio().then(success => {
+                if (!success) return;
+                
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                // 即使 AudioContext 是 24kHz，我们仍然可以创建一个 16kHz 的处理节点
+                // 但为了简单和兼容，让 ScriptProcessor 跟随 AudioContext 的采样率
+                const inputSampleRate = mediaStream.getAudioTracks()[0].getSettings().sampleRate;
+                // 这里我们不再自己创建 ScriptProcessor，因为重采样会让事情变复杂
+                // 最简单的做法是让浏览器处理，但为了发送16k数据，我们需要一些额外工作
+                // 不过，通常服务器能接受多种采样率，所以我们先不处理重采样
+                // 注：现代浏览器中推荐使用 AudioWorklet 进行重采样
+                
+                scriptProcessor = audioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
+                
+                scriptProcessor.onaudioprocess = (event) => {
+                    if (!isRecording) return;
+                    // TODO: 如果服务器严格要求16k输入，这里需要一个重采样步骤
+                    // 目前我们假设服务器能处理来自麦克风的原始采样率
+                    const inputData = event.inputBuffer.getChannelData(0);
+                    const pcmData = convertFloat32ToS16le(inputData);
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(pcmData);
+                    }
+                };
+
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination);
+
+                isRecording = true;
+                recordingStatusDiv.textContent = '录音: 进行中...';
+                recordingStatusDiv.className = 'recording';
+                toggleBtn.textContent = '结束对话';
+            });
+        }
+
+        function stopRecording() {
+            if (!isRecording) return;
+            isRecording = false;
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+                scriptProcessor = null;
+            }
+            recordingStatusDiv.textContent = '录音: 已停止';
+            recordingStatusDiv.className = 'stopped';
+            toggleBtn.textContent = '开始对话';
+        }
+        
+        function convertFloat32ToS16le(input) {
+            const buffer = new ArrayBuffer(input.length * 2);
+            const view = new DataView(buffer);
+            for (let i = 0; i < input.length; i++) {
+                const s = Math.max(-1, Math.min(1, input[i]));
+                view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+            return buffer;
+        }
+
+        toggleBtn.addEventListener('click', () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                if (isRecording) {
+                    stopRecording();
+                } else {
+                    startRecording();
+                }
+            } else {
+                connectWebSocket();
+            }
+        });
+
+        connectWebSocket();
+    });
+</script>
+
+</body>
+</html>
