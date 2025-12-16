@@ -1,18 +1,21 @@
 import gzip
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from loguru import logger
 import websockets
 
+from prompt.test_prompt import POSTTEST_PROMPT, PRETEST_PROMPT, INTEST_PROMPT
 import config as app_config
 import protocol
 import copy
 
 
 class RealtimeDialogClient:
-    def __init__(self, config: Dict[str, Any], session_id: str, output_audio_format: str = "pcm",
-                 mod: str = "audio", recv_timeout: int = 10) -> None:
+    def __init__(self, config: Dict[str, Any], session_id: str,
+                 output_audio_format: str = "pcm",
+                 mod: str = "audio", recv_timeout: int = 10,
+                 diag_phase: Optional[str] = None) -> None:
         self.config = config
         self.logid = ""
         self.session_id = session_id
@@ -20,8 +23,19 @@ class RealtimeDialogClient:
         self.mod = mod
         self.recv_timeout = recv_timeout
         self.ws = None
+        self.diag_phase = diag_phase
+
         # make a per-session copy of start_session_req to avoid global mutation across sessions
         self.start_session_req = copy.deepcopy(app_config.start_session_req)
+
+        if self.diag_phase == "pretest":
+            self.start_session_req['dialog']['system_role'] = PRETEST_PROMPT.render()
+        elif self.diag_phase == "posttest":
+            self.start_session_req['dialog']['system_role'] = POSTTEST_PROMPT.render()
+        elif self.diag_phase == "intest":
+            self.start_session_req['dialog']['system_role'] = INTEST_PROMPT.render()
+        else:
+            pass
 
     async def connect(self) -> None:
         """建立WebSocket连接"""

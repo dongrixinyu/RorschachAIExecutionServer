@@ -31,14 +31,16 @@ class DialogSession:
         self.session_id = str(uuid.uuid4())
         self.speaker = speaker
         self.auto_greet = auto_greet
-        
+        self.diag_phase = diag_phase
+
         # This client connects to the ByteDance service
         self.client = RealtimeDialogClient(
             config=ws_config, 
             session_id=self.session_id,
             output_audio_format=output_audio_format, 
             mod=mod, 
-            recv_timeout=recv_timeout
+            recv_timeout=recv_timeout,
+            diag_phase=self.diag_phase
         )
 
         self.is_running = True
@@ -67,9 +69,8 @@ class DialogSession:
 
         message_type = response.get('message_type')
         event = response.get('event')
-        payload = response.get('payload_msg')
-        
         # 兼容性：有些实现可能用 ACK 下发音频，也可能直接在 FULL_RESPONSE 中下发原始字节
+        payload = response.get('payload_msg')
         if isinstance(payload, (bytes, bytearray)):
             audio_len = len(payload)
             try:
@@ -77,13 +78,22 @@ class DialogSession:
                 logger.info(f"[Audio] Enqueued {audio_len} bytes from {message_type}")
             except Exception as e:
                 logger.info(f"[Audio] Failed to enqueue audio ({audio_len} bytes): {e}")
+
         elif message_type == 'SERVER_FULL_RESPONSE':
-            # Extract text transcription from different event types
+            logger.info(f"Server full response: {response}")
             self._extract_and_queue_text(response, event, payload)
+            # You can handle other events (450, 459, etc.) here if needed
+            event = response.get('event')
+            if event == 450:
+                # 该事件下，模型正在输出播放音频，但被用户打断，立即停止播放，接收用户说话
+                logger.info(f"清空缓存音频: {response['session_id']}")
+                while not self.audio_output_queue.empty():
+                    try:
+                        self.audio_output_queue.get_nowait()
+                    except queue.Empty:
+                        continue
+            #     self.is_user_querying = True
             
-            # Log other events for debugging
-            if event not in [550, 451, 450, 350, 553, 359]:
-                logger.debug(f"Server full response: event={event}, payload={payload}")
         elif message_type == 'SERVER_ERROR':
             logger.info(f"Server error: {response['payload_msg']}")
             # Consider closing the session on error

@@ -21,6 +21,7 @@ async def client_handler(websocket):
         # 尝试读取初始化消息以设置 speaker / mode
         init_speaker = None
         init_mode = None
+        diag_phase = None
         first_message = None
         try:
             first_message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
@@ -33,10 +34,16 @@ async def client_handler(websocket):
                         if "mode" in payload and isinstance(payload["mode"], str):
                             init_mode = payload["mode"].lower()
                         # 消费掉该初始化消息，不再作为首条业务消息处理
+                        if "phase" in payload:
+                            # 有三种初始化状态，它代表了对话服务，AI 将采用何种 prompt 来完成对话
+                            # pretest、intest、posttest
+                            diag_phase = payload["phase"]
                         first_message = None
+
                 except Exception:
                     # 非 JSON 文本，作为普通业务消息后续处理
                     pass
+
         except asyncio.TimeoutError:
             # 没有初始化消息，忽略
             pass
@@ -49,7 +56,8 @@ async def client_handler(websocket):
             websocket=websocket,
             speaker=init_speaker,
             mod=init_mode if isinstance(init_mode, str) else "audio",
-            auto_greet=False  # 启用自动打招呼，让豆包在连接时主动问候
+            auto_greet=False,  # 启用自动打招呼，让豆包在连接时主动问候
+            diag_phase=diag_phase  # 指定不同的对话 prompt
         )
         active_sessions.add(session)
 
