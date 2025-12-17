@@ -22,16 +22,28 @@ class DialogSession:
     Manages a single conversation session between a browser client and the
     ByteDance service. Each browser connection gets its own DialogSession instance.
     """
-    def __init__(self, ws_config: Dict[str, Any], websocket, 
-                 output_audio_format: str = "pcm", mod: str = "audio", 
-                 recv_timeout: int = 10, speaker: Optional[str] = None, 
-                 auto_greet: bool = False):
+    def __init__(
+        self,
+        ws_config: Dict[str, Any],
+        websocket,
+        output_audio_format: str = "pcm",
+        mod: str = "audio",
+        recv_timeout: int = 10,
+        speaker: Optional[str] = None,
+        auto_greet: bool = False,
+        diag_phase: Optional[str] = None,
+    ):
         self.client_websocket = websocket  # WebSocket connection to the browser
         self.mod = (mod or "audio").lower()
         self.session_id = str(uuid.uuid4())
         self.speaker = speaker
         self.auto_greet = auto_greet
         self.diag_phase = diag_phase
+
+        logger.info(
+            f"[DialogSession] 初始化: session_id={self.session_id}, "
+            f"mod={self.mod}, speaker={self.speaker}, diag_phase={self.diag_phase}"
+        )
 
         # This client connects to the ByteDance service
         self.client = RealtimeDialogClient(
@@ -329,11 +341,17 @@ class DialogSession:
         """Sends a TTS text request via the upstream client."""
         if not self.is_running or not self.client:
             return
+        preview = content[:80].replace("\n", " ")
+        logger.info(
+            f"[DialogSession] send_tts_text: start={start}, end={end}, "
+            f"is_user_querying={is_user_querying}, content_preview='{preview}'"
+        )
         await self.client.chat_tts_text(is_user_querying=is_user_querying, start=start, end=end, content=content)
     
     async def process_client_audio(self, audio_data: bytes):
         """Processes an audio chunk received from the browser client."""
         if self.is_running and self.client:
+            logger.debug(f"[DialogSession] process_client_audio: {len(audio_data)} bytes from browser")
             await self.client.task_request(audio_data)
 
     async def start(self) -> None:

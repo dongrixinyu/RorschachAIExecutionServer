@@ -25,9 +25,11 @@ async def client_handler(websocket):
         first_message = None
         try:
             first_message = await asyncio.wait_for(websocket.recv(), timeout=1.0)
+            logger.info(f"[Client] Received first_message raw: {repr(first_message)}")
             if isinstance(first_message, str):
                 try:
                     payload = json.loads(first_message)
+                    logger.info(f"[Client] Parsed first_message payload: {payload}")
                     if isinstance(payload, dict) and payload.get("type") in ("init", "set"):
                         if "speaker" in payload:
                             init_speaker = payload["speaker"]
@@ -42,22 +44,26 @@ async def client_handler(websocket):
 
                 except Exception:
                     # 非 JSON 文本，作为普通业务消息后续处理
-                    pass
+                    logger.warning(f"[Client] Failed to parse first_message as JSON, will treat as business message")
 
         except asyncio.TimeoutError:
             # 没有初始化消息，忽略
-            pass
+            logger.info("[Client] No init message received within timeout, continue without init")
 
         # 为此客户端实例化一个 DialogSession。
         # 传入 websocket 对象，以便 session 可以将数据回传给浏览器。
+        logger.info(
+            f"[Client] Creating DialogSession: speaker={init_speaker}, "
+            f"mode={init_mode}, diag_phase={diag_phase}"
+        )
         session = DialogSession(
             ws_config=config.ws_connect_config,
-            output_audio_format="pcm_s16le", # 使用 s16le 以获得更好的 Web 兼容性
+            output_audio_format="pcm_s16le",  # 使用 s16le 以获得更好的 Web 兼容性
             websocket=websocket,
             speaker=init_speaker,
             mod=init_mode if isinstance(init_mode, str) else "audio",
-            auto_greet=False,  # 启用自动打招呼，让豆包在连接时主动问候
-            diag_phase=diag_phase  # 指定不同的对话 prompt
+            auto_greet=False,  # 是否自动打招呼
+            diag_phase=diag_phase,  # 指定不同的对话 prompt
         )
         active_sessions.add(session)
 
@@ -89,14 +95,25 @@ async def client_handler(websocket):
         async for message in websocket:
             # 文本消息：用于纯 TTS 播报
             if isinstance(message, str):
+                logger.info(f"[Client] Received text message from browser: {message}")
                 try:
                     payload = json.loads(message)
                 except Exception:
+                    logger.warning("[Client] Failed to parse browser text message as JSON")
                     payload = None
                 if isinstance(payload, dict):
                     msg_type = payload.get("type")
+                    logger.info(f"[Client] Parsed browser payload: type={msg_type}, keys={list(payload.keys())}")
                     if msg_type == "tts_text":
                         try:
+                            content_preview = str(payload.get("content", ""))[:80].replace("\n", " ")
+                            logger.info(
+                                f"[Client] Handling tts_text: "
+                                f"start={bool(payload.get('start', True))}, "
+                                f"end={bool(payload.get('end', True))}, "
+                                f"is_user_querying={bool(payload.get('is_user_querying', False))}, "
+                                f"content_preview='{content_preview}'"
+                            )
                             await session.send_tts_text(
                                 start=bool(payload.get("start", True)),
                                 end=bool(payload.get("end", True)),
@@ -108,7 +125,10 @@ async def client_handler(websocket):
                         continue
                     if msg_type == "text_query":
                         try:
-                            await session.client.chat_text_query(str(payload.get("content", "")))
+                            content = str(payload.get("content", ""))
+                            preview = content[:80].replace("\n", " ")
+                            logger.info(f"[Client] Handling text_query: content_preview='{preview}'")
+                            await session.client.chat_text_query(content)
                         except Exception as e:
                             logger.info(f"Error sending text query: {e}")
                         continue
@@ -117,6 +137,7 @@ async def client_handler(websocket):
 
             # 二进制：视为音频块透传给上游
             if session.mod != "text":
+                logger.debug(f"[Client] Received binary audio chunk from browser: {len(message)} bytes")
                 await session.process_client_audio(message)
 
     except websockets.exceptions.ConnectionClosed as e:
